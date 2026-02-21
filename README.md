@@ -2,7 +2,10 @@
 
 `srt_gen` is a cross-platform Python CLI that generates English `.srt` subtitle files from video or audio input.
 
-It is built for local-first usage with Whisper (`faster-whisper`) and supports an optional OpenAI backend.
+It is built for local-first usage with Whisper and supports three local/cloud backend paths:
+- `mlx-whisper` (preferred on Apple Silicon)
+- `faster-whisper` (cross-platform local backend)
+- OpenAI audio translation API (optional cloud backend)
 
 ## What It Does
 - Accepts media input (any format ffmpeg can decode).
@@ -15,7 +18,9 @@ It is built for local-first usage with Whisper (`faster-whisper`) and supports a
 - Source language: any language (`--source-lang auto` by default).
 - Output language: always English.
 - Backends:
-  - `local` (default): `faster-whisper`
+  - `auto` (default): picks `mlx` on Apple Silicon, otherwise `local`
+  - `mlx`: `mlx-whisper` backend (Apple Silicon only)
+  - `local`: `faster-whisper`
   - `openai` (optional): OpenAI audio translation API
 
 ## Requirements
@@ -26,18 +31,22 @@ It is built for local-first usage with Whisper (`faster-whisper`) and supports a
 
 ### 1. Setup environment and dependencies
 ```bash
-./setup_env.sh .venv large-v3
+./setup_env.sh .venv
 ```
 
 What this does:
 - verifies `python3`, `ffmpeg`, and `ffprobe`
 - creates `.venv`
-- installs project dependencies (`.[openai,dev]`)
-- optionally pre-downloads the local Whisper model (`large-v3` above)
+- installs project dependencies (`.[openai,dev]`), plus Apple extras on Apple Silicon
+- pre-downloads a default model on Apple Silicon (`mlx-community/whisper-large-v3-mlx`)
 
-If you do not want pre-download:
+Optional custom pre-download:
 ```bash
-./setup_env.sh
+# faster-whisper model
+./setup_env.sh .venv large-v3 local
+
+# mlx-whisper model
+./setup_env.sh .venv mlx-community/whisper-large-v3-mlx mlx
 ```
 
 ### 2. Activate virtual environment
@@ -73,9 +82,14 @@ Optional OpenAI support:
 pip install -e ".[openai]"
 ```
 
+Apple Silicon optional extras:
+```bash
+pip install -e ".[apple]"
+```
+
 ## Usage Examples
 
-### Basic (local backend, default model)
+### Basic (auto backend)
 ```bash
 srt-gen input.mp4
 ```
@@ -88,6 +102,11 @@ srt-gen input.mp4 -o subtitles/output.srt
 ### Use a faster/lighter local model
 ```bash
 srt-gen input.mp4 --backend local --model medium
+```
+
+### Use MLX backend explicitly (Apple Silicon)
+```bash
+srt-gen input.mp4 --backend mlx --model mlx-community/whisper-large-v3-mlx
 ```
 
 ### Specify source language (or keep auto-detect)
@@ -114,13 +133,14 @@ srt-gen input.mp4 --quiet
 ## CLI Reference
 ```text
 srt-gen input [-o output.srt]
-  [--backend local|openai]
+  [--backend auto|local|mlx|openai]
   [--model MODEL]
   [--source-lang LANG|auto]
   [--api-key KEY]
   [--ffmpeg-bin PATH]
   [--max-line-chars N]
   [--max-lines N]
+  [--max-cps N]
   [--min-duration SECONDS]
   [--max-duration SECONDS]
   [--device auto|cpu|cuda]
@@ -137,9 +157,10 @@ srt-gen input [-o output.srt]
 
 ### Backend and language
 - `--backend`
-  - `local` (default) or `openai`
+  - `auto` (default), `local`, `mlx`, or `openai`
 - `--model`
-  - local default: `large-v3`
+  - auto/mlx default: `mlx-community/whisper-large-v3-mlx` (Apple Silicon)
+  - local default: `large-v3` (non-Apple, or when `--backend local`)
   - openai default: `whisper-1`
 - `--source-lang`
   - source language code (for example `ja`, `fr`, `es`) or `auto` (default)
@@ -151,6 +172,8 @@ srt-gen input [-o output.srt]
   - target max characters per line (default: `42`)
 - `--max-lines`
   - max lines per cue (default: `2`)
+- `--max-cps`
+  - target max reading speed in characters per second (default: `20.0`)
 - `--min-duration`
   - minimum cue duration in seconds (default: `1.0`)
 - `--max-duration`
@@ -160,9 +183,9 @@ srt-gen input [-o output.srt]
 - `--ffmpeg-bin`
   - ffmpeg executable name/path (default: `ffmpeg`)
 - `--device`
-  - local backend device: `auto`, `cpu`, or `cuda` (default: `auto`)
+  - local `faster-whisper` device: `auto`, `cpu`, or `cuda` (default: `auto`)
 - `--compute-type`
-  - local backend compute type (default: `auto`)
+  - local `faster-whisper` compute type (default: `auto`)
 - `--quiet`
   - disable progress/status messages
 
@@ -177,13 +200,17 @@ This is intended to show activity during long files/model initialization.
 
 ## How Translation Works
 - Local backend calls Whisper with `task="translate"` (transcribe + translate to English in one pass).
+- MLX backend calls Whisper with `task="translate"` (transcribe + translate to English in one pass).
 - OpenAI backend uses the audio translation endpoint.
 - There is no separate post-translation step.
 
 ## Notes on Models
-- Local default model is `large-v3` for quality.
+- On Apple Silicon with `--backend auto`, default model is `mlx-community/whisper-large-v3-mlx`.
+- On non-Apple systems (or `--backend local`), default model is `large-v3`.
 - You can trade speed for accuracy with `--model medium` or smaller.
 - First use of a local model may take longer due to model download.
+- If language auto-detection is wrong, pass `--source-lang` explicitly (for example `ja`, `ko`, `fr`).
+- MLX backend also accepts short aliases like `large-v3`, `medium`, `small`, and `turbo`.
 
 ## Troubleshooting
 
@@ -222,6 +249,7 @@ export OPENAI_API_KEY=your_key_here
 Tune:
 - `--max-line-chars`
 - `--max-lines`
+- `--max-cps`
 - `--min-duration`
 - `--max-duration`
 
@@ -237,6 +265,7 @@ srt_gen/
   backends/
     base.py
     local_whisper.py
+    mlx_whisper.py
     openai_api.py
 ```
 

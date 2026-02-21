@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import platform
 import sys
 import tempfile
 import time
 from pathlib import Path
 
 from srt_gen.backends.local_whisper import LocalWhisperBackend
+from srt_gen.backends.mlx_whisper import MLXWhisperBackend
 from srt_gen.backends.openai_api import OpenAIBackend
 from srt_gen.media import extract_audio
 from srt_gen.segmentation import build_cues
@@ -23,6 +25,10 @@ def _status(message: str, *, quiet: bool) -> None:
     print(f"[srt-gen] {message}", file=sys.stderr, flush=True)
 
 
+def _is_apple_silicon() -> bool:
+    return platform.system() == "Darwin" and platform.machine().lower() == "arm64"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="srt-gen",
@@ -31,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("input", type=Path, help="Input media file path")
     parser.add_argument("-o", "--output", type=Path, help="Output .srt file path")
 
-    parser.add_argument("--backend", choices=["local", "openai"], default="local")
+    parser.add_argument("--backend", choices=["auto", "local", "mlx", "openai"], default="auto")
     parser.add_argument("--model", help="Model name for selected backend")
     parser.add_argument("--source-lang", default="auto", help="Source language code or 'auto'")
     parser.add_argument("--api-key", help="OpenAI API key (for openai backend)")
@@ -39,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ffmpeg-bin", default="ffmpeg", help="ffmpeg binary path")
     parser.add_argument("--max-line-chars", type=int, default=42)
     parser.add_argument("--max-lines", type=int, default=2)
+    parser.add_argument("--max-cps", type=float, default=20.0, help="Max subtitle reading speed (chars/sec)")
     parser.add_argument("--min-duration", type=float, default=1.0)
     parser.add_argument("--max-duration", type=float, default=6.0)
 
@@ -51,13 +58,25 @@ def build_parser() -> argparse.ArgumentParser:
 def _build_backend(args: argparse.Namespace):
     if args.backend == "openai":
         model = args.model or "whisper-1"
-        return OpenAIBackend(api_key=args.api_key, model_name=model)
+        return "openai", OpenAIBackend(api_key=args.api_key, model_name=model)
+
+    if args.backend == "mlx":
+        model = args.model or "mlx-community/whisper-large-v3-mlx"
+        return "mlx", MLXWhisperBackend(model_name=model)
+
+    if args.backend == "auto" and _is_apple_silicon():
+        if args.model and "/" not in args.model and not args.model.startswith("mlx-"):
+            return "local", LocalWhisperBackend(
+                model_name=args.model,
+                device=args.device,
+                compute_type=args.compute_type,
+            )
+        model = args.model or "mlx-community/whisper-large-v3-mlx"
+        return "mlx", MLXWhisperBackend(model_name=model)
 
     model = args.model or "large-v3"
-    return LocalWhisperBackend(
-        model_name=model,
-        device=args.device,
-        compute_type=args.compute_type,
+    return "local", LocalWhisperBackend(
+        model_name=model, device=args.device, compute_type=args.compute_type
     )
 
 
@@ -68,9 +87,10 @@ def run(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
     output_path = (args.output or _default_output_for(input_path)).expanduser().resolve()
-    backend = _build_backend(args)
+    backend_name, backend = _build_backend(args)
     _status(f"Input: {input_path}", quiet=args.quiet)
     _status(f"Output: {output_path}", quiet=args.quiet)
+    _status(f"Backend: {backend_name}", quiet=args.quiet)
 
     with tempfile.TemporaryDirectory(prefix="srt-gen-") as tmp_dir:
         extract_start = time.monotonic()
@@ -103,6 +123,7 @@ def run(args: argparse.Namespace) -> int:
         segments,
         max_line_chars=args.max_line_chars,
         max_lines=args.max_lines,
+        max_cps=args.max_cps,
         min_duration=args.min_duration,
         max_duration=args.max_duration,
     )
