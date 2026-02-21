@@ -6,6 +6,7 @@ from typing import Any
 
 from srt_gen.backends.base import ProgressCallback
 from srt_gen.models import TranscriptSegment
+from srt_gen.text_cleanup import collapse_repeated_word_loops
 
 
 def _field(obj: Any, key: str, default: Any = None) -> Any:
@@ -60,6 +61,7 @@ class OpenAIBackend:
         segments: list[TranscriptSegment] = []
         for seg in segments_raw:
             text = (_field(seg, "text", "") or "").strip()
+            text = collapse_repeated_word_loops(text)
             if not text:
                 continue
             start = float(_field(seg, "start", 0.0))
@@ -75,6 +77,7 @@ class OpenAIBackend:
 
         # Fallback when segment-level timestamps are not returned by the API.
         text = (_field(response, "text", "") or "").strip()
+        text = collapse_repeated_word_loops(text)
         if not text:
             return []
         duration = float(_field(response, "duration", 0.0) or 0.0)

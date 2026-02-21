@@ -10,6 +10,7 @@ from pathlib import Path
 from srt_gen.backends.local_whisper import LocalWhisperBackend
 from srt_gen.backends.mlx_whisper import MLXWhisperBackend
 from srt_gen.backends.openai_api import OpenAIBackend
+from srt_gen.backends.torch_whisper import TorchWhisperBackend
 from srt_gen.media import extract_audio
 from srt_gen.segmentation import build_cues
 from srt_gen.srt_writer import write_srt
@@ -37,7 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("input", type=Path, help="Input media file path")
     parser.add_argument("-o", "--output", type=Path, help="Output .srt file path")
 
-    parser.add_argument("--backend", choices=["auto", "local", "mlx", "openai"], default="auto")
+    parser.add_argument(
+        "--backend",
+        choices=["auto", "local", "mlx", "torch", "openai"],
+        default="auto",
+    )
     parser.add_argument("--model", help="Model name for selected backend")
     parser.add_argument("--source-lang", default="auto", help="Source language code or 'auto'")
     parser.add_argument("--api-key", help="OpenAI API key (for openai backend)")
@@ -49,7 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-duration", type=float, default=1.0)
     parser.add_argument("--max-duration", type=float, default=6.0)
 
-    parser.add_argument("--device", default="auto", help="Local backend device (auto/cpu/cuda)")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="Backend device (auto/cpu/cuda). Torch backend also supports mps.",
+    )
     parser.add_argument("--compute-type", default="auto", help="Local backend compute type")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress/status messages")
     return parser
@@ -59,6 +68,10 @@ def _build_backend(args: argparse.Namespace):
     if args.backend == "openai":
         model = args.model or "whisper-1"
         return "openai", OpenAIBackend(api_key=args.api_key, model_name=model)
+
+    if args.backend == "torch":
+        model = args.model or "large-v3"
+        return "torch", TorchWhisperBackend(model_name=model, device=args.device)
 
     if args.backend == "mlx":
         model = args.model or "mlx-community/whisper-large-v3-mlx"

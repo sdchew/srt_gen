@@ -6,6 +6,9 @@ set -euo pipefail
 #   ./setup_env.sh .venv
 #   ./setup_env.sh .venv large-v3 local
 #   ./setup_env.sh .venv mlx-community/whisper-large-v3-mlx mlx
+# Optional:
+#   SRT_GEN_INSTALL_PROFILE=cpu|mlx|torch ./setup_env.sh .venv
+#   SRT_GEN_INSTALL_TORCH_BACKEND=1 ./setup_env.sh .venv
 #
 # Creates a virtual environment, installs project dependencies,
 # verifies ffmpeg is available, and optionally pre-downloads a Whisper model.
@@ -14,6 +17,8 @@ VENV_DIR="${1:-.venv}"
 MODEL_TO_PRELOAD="${2:-}"
 PRELOAD_BACKEND="${3:-auto}"
 SKIP_MODEL_PRELOAD="${SRT_GEN_SKIP_MODEL_PRELOAD:-0}"
+INSTALL_TORCH_BACKEND="${SRT_GEN_INSTALL_TORCH_BACKEND:-0}"
+INSTALL_PROFILE="${SRT_GEN_INSTALL_PROFILE:-auto}"
 
 OS_NAME="$(uname -s 2>/dev/null || true)"
 ARCH_NAME="$(uname -m 2>/dev/null || true)"
@@ -21,6 +26,55 @@ IS_APPLE_SILICON=0
 if [[ "${OS_NAME}" == "Darwin" && "${ARCH_NAME}" == "arm64" ]]; then
   IS_APPLE_SILICON=1
 fi
+
+resolve_install_profile() {
+  local profile="${INSTALL_PROFILE}"
+  local default_profile="cpu"
+  if [[ "${IS_APPLE_SILICON}" -eq 1 ]]; then
+    default_profile="mlx"
+  fi
+
+  # Backward compatibility for existing callers.
+  if [[ "${profile}" == "auto" && "${INSTALL_TORCH_BACKEND}" == "1" ]]; then
+    profile="torch"
+  fi
+
+  if [[ "${profile}" == "auto" && -t 0 && -t 1 ]]; then
+    echo
+    echo "Select backend components to install:"
+    echo "  1) cpu   - faster-whisper (cross-platform)"
+    if [[ "${IS_APPLE_SILICON}" -eq 1 ]]; then
+      echo "  2) mlx   - mlx-whisper (Apple Silicon only)"
+    fi
+    echo "  3) torch - openai-whisper + torch (mps/cuda/cpu)"
+    read -r -p "Choice [${default_profile}]: " profile
+    profile="${profile:-${default_profile}}"
+    case "${profile}" in
+      1) profile="cpu" ;;
+      2) profile="mlx" ;;
+      3) profile="torch" ;;
+    esac
+  fi
+
+  if [[ "${profile}" == "auto" ]]; then
+    profile="${default_profile}"
+  fi
+
+  case "${profile}" in
+    cpu|mlx|torch) ;;
+    *)
+      echo "Error: invalid install profile '${profile}'. Use cpu, mlx, or torch." >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ "${profile}" == "mlx" && "${IS_APPLE_SILICON}" -ne 1 ]]; then
+    echo "Error: install profile 'mlx' is only supported on Apple Silicon (Darwin arm64)." >&2
+    exit 1
+  fi
+
+  echo "${profile}"
+}
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "Error: python3 is not installed or not on PATH." >&2
@@ -51,12 +105,58 @@ source "${VENV_DIR}/bin/activate"
 echo "Upgrading pip/setuptools/wheel..."
 python -m pip install --upgrade pip setuptools wheel
 
-if [[ "${IS_APPLE_SILICON}" -eq 1 ]]; then
-  echo "Apple Silicon detected: installing Apple MLX dependencies too..."
-  python -m pip install -e ".[openai,dev,apple]"
-else
-  echo "Installing project with optional OpenAI + dev dependencies..."
-  python -m pip install -e ".[openai,dev]"
+INSTALL_PROFILE_RESOLVED="$(resolve_install_profile)"
+echo "Install profile: ${INSTALL_PROFILE_RESOLVED}"
+
+EXTRAS="openai,dev"
+if [[ "${INSTALL_PROFILE_RESOLVED}" == "mlx" ]]; then
+  EXTRAS="${EXTRAS},apple"
+fi
+if [[ "${INSTALL_PROFILE_RESOLVED}" == "torch" ]]; then
+  EXTRAS="${EXTRAS},torch"
+fi
+
+echo "Installing project extras: [${EXTRAS}]..."
+python -m pip install -e ".[${EXTRAS}]"
+if [[ "${INSTALL_PROFILE_RESOLVED}" != "torch" ]]; then
+  echo "Tip: set SRT_GEN_INSTALL_PROFILE=torch (or SRT_GEN_INSTALL_TORCH_BACKEND=1) to install --backend torch dependencies."
+fi
+
+python_has_module() {
+  local module="$1"
+  python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('${module}') else 1)"
+}
+
+TORCH_INSTALLED=0
+WHISPER_INSTALLED=0
+if python_has_module torch; then
+  TORCH_INSTALLED=1
+fi
+if python_has_module whisper; then
+  WHISPER_INSTALLED=1
+fi
+
+if [[ "${INSTALL_PROFILE_RESOLVED}" == "torch" ]]; then
+  if [[ "${TORCH_INSTALLED}" -ne 1 || "${WHISPER_INSTALLED}" -ne 1 ]]; then
+    echo "Error: torch backend dependencies are incomplete." >&2
+    echo "Expected both 'torch' and 'openai-whisper' after install." >&2
+    echo "Try: python -m pip install -e '.[torch]'" >&2
+    exit 1
+  fi
+  echo "Torch backend dependencies verified (torch + openai-whisper)."
+elif [[ "${TORCH_INSTALLED}" -eq 1 && "${WHISPER_INSTALLED}" -ne 1 ]]; then
+  echo "Detected 'torch' without 'openai-whisper'. Installing missing dependency for --backend torch..."
+  if python -m pip install openai-whisper; then
+    if python_has_module whisper; then
+      echo "Installed 'openai-whisper' successfully."
+    else
+      echo "Warning: 'openai-whisper' install completed but import check failed." >&2
+      echo "Run: python -m pip install -e '.[torch]'" >&2
+    fi
+  else
+    echo "Warning: could not install 'openai-whisper' automatically." >&2
+    echo "Run: python -m pip install -e '.[torch]'" >&2
+  fi
 fi
 
 if [[ "${PRELOAD_BACKEND}" != "auto" && "${PRELOAD_BACKEND}" != "local" && "${PRELOAD_BACKEND}" != "mlx" ]]; then
@@ -64,7 +164,12 @@ if [[ "${PRELOAD_BACKEND}" != "auto" && "${PRELOAD_BACKEND}" != "local" && "${PR
   exit 1
 fi
 
-if [[ -z "${MODEL_TO_PRELOAD}" && "${IS_APPLE_SILICON}" -eq 1 ]]; then
+DEFAULT_PRELOAD_BACKEND="local"
+if [[ "${INSTALL_PROFILE_RESOLVED}" == "mlx" ]]; then
+  DEFAULT_PRELOAD_BACKEND="mlx"
+fi
+
+if [[ -z "${MODEL_TO_PRELOAD}" && "${DEFAULT_PRELOAD_BACKEND}" == "mlx" ]]; then
   MODEL_TO_PRELOAD="mlx-community/whisper-large-v3-mlx"
 fi
 
@@ -73,11 +178,7 @@ if [[ "${SKIP_MODEL_PRELOAD}" == "1" ]]; then
 elif [[ -n "${MODEL_TO_PRELOAD}" ]]; then
   SELECTED_PRELOAD_BACKEND="${PRELOAD_BACKEND}"
   if [[ "${SELECTED_PRELOAD_BACKEND}" == "auto" ]]; then
-    if [[ "${IS_APPLE_SILICON}" -eq 1 ]]; then
-      SELECTED_PRELOAD_BACKEND="mlx"
-    else
-      SELECTED_PRELOAD_BACKEND="local"
-    fi
+    SELECTED_PRELOAD_BACKEND="${DEFAULT_PRELOAD_BACKEND}"
   fi
 
   if [[ "${SELECTED_PRELOAD_BACKEND}" == "mlx" && "${IS_APPLE_SILICON}" -ne 1 ]]; then

@@ -2,9 +2,10 @@
 
 `srt_gen` is a cross-platform Python CLI that generates English `.srt` subtitle files from video or audio input.
 
-It is built for local-first usage with Whisper and supports three local/cloud backend paths:
+It is built for local-first usage with Whisper and supports four local/cloud backend paths:
 - `mlx-whisper` (preferred on Apple Silicon)
 - `faster-whisper` (cross-platform local backend)
+- OpenAI Whisper (PyTorch backend; supports `mps`, `cuda`, `cpu`)
 - OpenAI audio translation API (optional cloud backend)
 
 ## What It Does
@@ -21,6 +22,7 @@ It is built for local-first usage with Whisper and supports three local/cloud ba
   - `auto` (default): picks `mlx` on Apple Silicon, otherwise `local`
   - `mlx`: `mlx-whisper` backend (Apple Silicon only)
   - `local`: `faster-whisper`
+  - `torch`: OpenAI Whisper via PyTorch (`mps`/`cuda`/`cpu`)
   - `openai` (optional): OpenAI audio translation API
 
 ## Requirements
@@ -38,7 +40,14 @@ What this does:
 - verifies `python3`, `ffmpeg`, and `ffprobe`
 - creates `.venv`
 - installs project dependencies (`.[openai,dev]`), plus Apple extras on Apple Silicon
+- prompts for install profile in interactive shells: `cpu`, `mlx`, or `torch`
+- verifies backend dependency consistency and auto-fixes common `torch`/`openai-whisper` mismatch
 - pre-downloads a default model on Apple Silicon (`mlx-community/whisper-large-v3-mlx`)
+
+Optional: preselect profile without prompt (useful for CI):
+```bash
+SRT_GEN_INSTALL_PROFILE=torch ./setup_env.sh .venv
+```
 
 Optional custom pre-download:
 ```bash
@@ -77,7 +86,7 @@ pip install --upgrade pip setuptools wheel
 pip install -e .
 ```
 
-Optional OpenAI support:
+Optional OpenAI API support:
 ```bash
 pip install -e ".[openai]"
 ```
@@ -85,6 +94,11 @@ pip install -e ".[openai]"
 Apple Silicon optional extras:
 ```bash
 pip install -e ".[apple]"
+```
+
+Optional PyTorch Whisper backend (`--backend torch`):
+```bash
+pip install -e ".[torch]"
 ```
 
 ## Usage Examples
@@ -107,6 +121,11 @@ srt-gen input.mp4 --backend local --model medium
 ### Use MLX backend explicitly (Apple Silicon)
 ```bash
 srt-gen input.mp4 --backend mlx --model mlx-community/whisper-large-v3-mlx
+```
+
+### Use PyTorch Whisper backend on Metal (Apple Silicon)
+```bash
+srt-gen input.mp4 --backend torch --device mps --model large-v3
 ```
 
 ### Specify source language (or keep auto-detect)
@@ -133,7 +152,7 @@ srt-gen input.mp4 --quiet
 ## CLI Reference
 ```text
 srt-gen input [-o output.srt]
-  [--backend auto|local|mlx|openai]
+  [--backend auto|local|mlx|torch|openai]
   [--model MODEL]
   [--source-lang LANG|auto]
   [--api-key KEY]
@@ -143,7 +162,7 @@ srt-gen input [-o output.srt]
   [--max-cps N]
   [--min-duration SECONDS]
   [--max-duration SECONDS]
-  [--device auto|cpu|cuda]
+  [--device auto|cpu|cuda|mps]
   [--compute-type TYPE]
   [--quiet]
 ```
@@ -157,10 +176,11 @@ srt-gen input [-o output.srt]
 
 ### Backend and language
 - `--backend`
-  - `auto` (default), `local`, `mlx`, or `openai`
+  - `auto` (default), `local`, `mlx`, `torch`, or `openai`
 - `--model`
   - auto/mlx default: `mlx-community/whisper-large-v3-mlx` (Apple Silicon)
   - local default: `large-v3` (non-Apple, or when `--backend local`)
+  - torch default: `large-v3`
   - openai default: `whisper-1`
 - `--source-lang`
   - source language code (for example `ja`, `fr`, `es`) or `auto` (default)
@@ -184,6 +204,7 @@ srt-gen input [-o output.srt]
   - ffmpeg executable name/path (default: `ffmpeg`)
 - `--device`
   - local `faster-whisper` device: `auto`, `cpu`, or `cuda` (default: `auto`)
+  - torch `openai-whisper` device: `auto`, `cpu`, `cuda`, or `mps`
 - `--compute-type`
   - local `faster-whisper` compute type (default: `auto`)
 - `--quiet`
@@ -201,12 +222,14 @@ This is intended to show activity during long files/model initialization.
 ## How Translation Works
 - Local backend calls Whisper with `task="translate"` (transcribe + translate to English in one pass).
 - MLX backend calls Whisper with `task="translate"` (transcribe + translate to English in one pass).
+- Torch backend calls OpenAI Whisper with `task="translate"` (transcribe + translate to English in one pass).
 - OpenAI backend uses the audio translation endpoint.
 - There is no separate post-translation step.
 
 ## Notes on Models
 - On Apple Silicon with `--backend auto`, default model is `mlx-community/whisper-large-v3-mlx`.
 - On non-Apple systems (or `--backend local`), default model is `large-v3`.
+- On `--backend torch`, default model is `large-v3` and device can be `mps` on Apple Silicon.
 - You can trade speed for accuracy with `--model medium` or smaller.
 - First use of a local model may take longer due to model download.
 - If language auto-detection is wrong, pass `--source-lang` explicitly (for example `ja`, `ko`, `fr`).
@@ -239,6 +262,17 @@ ffprobe -version
 ### Long delay before first transcription
 Expected on first run for a model: weights are downloaded/cached.
 
+### Repeated word loops in output
+If you see loops like `the the the the`, it is usually a decoding issue from the speech model (not SRT formatting).
+
+What helps:
+- Keep `--source-lang` explicit when auto-detection is unreliable.
+- Try a stronger model (`--model large-v3` for local, or `mlx-community/whisper-large-v3-mlx` on Apple Silicon).
+- Try another backend (`--backend local` vs `--backend mlx` vs `--backend torch`) for the same file.
+- Improve audio quality before transcription (reduce background noise/music where possible).
+
+`srt_gen` also applies a conservative cleanup pass that removes obvious single-word loops (3+ repeated words in a row) from backend text.
+
 ### OpenAI backend fails with API key error
 Set key in environment or pass `--api-key`:
 ```bash
@@ -266,6 +300,7 @@ srt_gen/
     base.py
     local_whisper.py
     mlx_whisper.py
+    torch_whisper.py
     openai_api.py
 ```
 

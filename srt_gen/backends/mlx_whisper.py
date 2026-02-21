@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import inspect
 import platform
+import re
 from pathlib import Path
 from typing import Any
 
 from srt_gen.backends.base import ProgressCallback
 from srt_gen.models import TranscriptSegment
+from srt_gen.text_cleanup import collapse_repeated_word_loops
 
 
 MLX_MODEL_ALIASES: dict[str, str] = {
@@ -19,6 +22,7 @@ MLX_MODEL_ALIASES: dict[str, str] = {
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
     "turbo": "mlx-community/whisper-turbo",
 }
+_UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument ['\"]([^'\"]+)['\"]")
 
 
 def _field(obj: Any, key: str, default: Any = None) -> Any:
@@ -60,6 +64,45 @@ class MLXWhisperBackend:
         self._module = mlx_whisper
         return self._module
 
+    def _supported_transcribe_kwargs(
+        self, transcribe_fn: Any, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            signature = inspect.signature(transcribe_fn)
+        except (TypeError, ValueError):
+            return kwargs
+        has_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
+        )
+        if has_kwargs:
+            return kwargs
+        supported = set(signature.parameters)
+        return {key: value for key, value in kwargs.items() if key in supported}
+
+    def _transcribe_with_kwarg_fallback(
+        self,
+        transcribe_fn: Any,
+        audio_path: Path,
+        kwargs: dict[str, Any],
+        progress_callback: ProgressCallback | None,
+    ) -> Any:
+        active_kwargs = dict(kwargs)
+        while True:
+            try:
+                return transcribe_fn(str(audio_path), **active_kwargs)
+            except TypeError as exc:
+                match = _UNEXPECTED_KWARG_RE.search(str(exc))
+                if not match:
+                    raise
+                bad_key = match.group(1)
+                if bad_key not in active_kwargs:
+                    raise
+                active_kwargs.pop(bad_key, None)
+                if progress_callback:
+                    progress_callback(
+                        f"MLX backend does not support '{bad_key}'. Retrying without it."
+                    )
+
     def transcribe(
         self,
         audio_path: Path,
@@ -75,18 +118,28 @@ class MLXWhisperBackend:
             "path_or_hf_repo": self.model_name,
             "task": "translate",
             "verbose": False,
+            "condition_on_previous_text": False,
+            "repetition_penalty": 1.1,
+            "no_repeat_ngram_size": 3,
         }
         if source_language not in {"auto", "", None}:
             kwargs["language"] = source_language
+        kwargs = self._supported_transcribe_kwargs(mlx_whisper.transcribe, kwargs)
 
         if progress_callback:
             progress_callback("Running MLX transcription...")
-        result = mlx_whisper.transcribe(str(audio_path), **kwargs)
+        result = self._transcribe_with_kwarg_fallback(
+            mlx_whisper.transcribe,
+            audio_path,
+            kwargs,
+            progress_callback,
+        )
 
         segments_raw = _field(result, "segments", None) or []
         segments: list[TranscriptSegment] = []
         for seg in segments_raw:
             text = (_field(seg, "text", "") or "").strip()
+            text = collapse_repeated_word_loops(text)
             if not text:
                 continue
             start = float(_field(seg, "start", 0.0))
@@ -101,6 +154,7 @@ class MLXWhisperBackend:
             return segments
 
         text = (_field(result, "text", "") or "").strip()
+        text = collapse_repeated_word_loops(text)
         if not text:
             return []
         duration = float(_field(result, "duration", 0.0) or 0.0)

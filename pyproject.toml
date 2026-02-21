@@ -16,6 +16,10 @@ dependencies = [
 openai = [
   "openai>=1.40.0",
 ]
+torch = [
+  "openai-whisper>=20240930",
+  "torch>=2.2.0",
+]
 apple = [
   "mlx-whisper>=0.4.3; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
