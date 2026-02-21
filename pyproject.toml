@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "srt-gen"
+version = "0.1.0"
+description = "CLI tool to generate English SRT subtitle files from media inputs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "faster-whisper>=1.0.0",
+]
+
+[project.optional-dependencies]
+openai = [
+  "openai>=1.40.0",
+]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+srt-gen = "srt_gen.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["srt_gen"]
